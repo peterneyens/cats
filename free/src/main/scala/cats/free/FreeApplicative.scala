@@ -36,7 +36,7 @@ sealed abstract class FreeApplicative[F[_], A] extends Product with Serializable
     * Tail recursive.
     */
   // scalastyle:off method.length
-  final def foldMap[G[_]](f: F ~> G)(implicit G: Applicative[G]): G[A] = {
+  final def foldMapOld[G[_]](f: F ~> G)(implicit G: Applicative[G]): G[A] = {
     import FreeApplicative._
     // the remaining arguments to G[A => B]'s
     var argsF: List[FA[F, Any]] = this.asInstanceOf[FA[F, Any]] :: Nil
@@ -119,6 +119,47 @@ sealed abstract class FreeApplicative[F[_], A] extends Product with Serializable
   }
   // scalastyle:on method.length
 
+  final def foldMap[G[_]](fk: F ~> G)(implicit G: Applicative[G]): G[A] = {
+    import FreeApplicative._
+
+    @tailrec
+    def reassociateApToFn(ap: Ap[F, Any, Any], args: List[FA[F, Any]], argsLength: Int): (List[FA[F, Any]], Fn[G, Any, Any]) = {
+      val args2 = ap.fp :: args
+      val argsLength2 = argsLength + 1
+      ap.fn match {
+        case apx @ Ap(_, _) => reassociateApToFn(apx.asInstanceOf[Ap[F, Any, Any]], args2, argsLength2)
+        case _              => (args2, Fn[G, Any, Any](foldArg(ap.fn, fk), argsLength2))
+      }
+    }
+
+    @tailrec
+    def applyFunctions(res: G[Any], fns: List[Fn[G, Any, Any]]): Either[List[Fn[G, Any, Any]], G[Any]] =
+      fns match {
+        case Fn(f, numArgs) :: fns =>
+          val res2 = G.ap(f)(res)
+          // bail out -> more left-associated trees
+          if (numArgs > 1)
+            Left(Fn(res2.asInstanceOf[G[Any => Any]], numArgs - 1) :: fns)
+          else applyFunctions(res2, fns)
+        case Nil =>
+          Right(res)
+      }
+
+    @tailrec
+    def loop(apArgs: List[FA[F, Any]], fns: List[Fn[G, Any, Any]]): G[Any] =
+      apArgs.head match {
+        case ap @ Ap(_, _) =>
+          val (extraArgs, fn) = reassociateApToFn(ap, Nil, 0)
+          loop(extraArgs ::: apArgs.tail, fn :: fns)
+        case other =>
+          applyFunctions(foldArg(other, fk), fns) match {
+            case Left(fns) => loop(apArgs.tail, fns)
+            case Right(x) => x
+          }
+      }
+
+    loop(this.asInstanceOf[FA[F, Any]] :: Nil, Nil).asInstanceOf[G[A]]
+  }
 
   /**
     * Interpret/run the operations using the semantics of `Applicative[F]`.
